@@ -1,0 +1,180 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const fetch = require('node-fetch');
+const app = express();
+const port = 3000;
+
+mongoose.connect('mongodb://localhost/product_transactions', { useNewUrlParser: true, useUnifiedTopology: true });
+
+const transactionSchema = new mongoose.Schema({
+  id: Number,
+  title: String,
+  price: Number,
+  description: String,
+  category: String,
+  image: String,
+  sold: Boolean,
+  dateOfSale: Date
+});
+
+const Transaction = mongoose.model('Transaction', transactionSchema);
+
+// Initialize database
+app.get('/api/initialize-db', async (req, res) => {
+  try {
+    const response = await fetch('https://s3.amazonaws.com/roxiler.com/product_transaction.json');
+    const data = await response.json();
+    
+    await Transaction.deleteMany({});
+    await Transaction.insertMany(data);
+    
+    res.json({ message: 'Database initialized successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to initialize database' });
+  }
+});
+
+// List transactions
+app.get('/api/transactions', async (req, res) => {
+  const { month, search, page = 1, perPage = 10 } = req.query;
+  
+  const query = {
+    dateOfSale: {
+      $regex: `${month}`,
+      $options: 'i'
+    }
+  };
+  
+  if (search) {
+    query.$or = [
+      { title: { $regex: search, $options: 'i' } },
+      { description: { $regex: search, $options: 'i' } },
+      { price: parseFloat(search) || 0 }
+    ];
+  }
+  
+  try {
+    const total = await Transaction.countDocuments(query);
+    const transactions = await Transaction.find(query)
+      .skip((page - 1) * perPage)
+      .limit(parseInt(perPage));
+    
+    res.json({
+      transactions,
+      currentPage: page,
+      totalPages: Math.ceil(total / perPage),
+      totalItems: total
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// Statistics
+app.get('/api/statistics', async (req, res) => {
+  const { month } = req.query;
+  
+  try {
+    const totalSaleAmount = await Transaction.aggregate([
+      { $match: { dateOfSale: { $regex: `${month}`, $options: 'i' }, sold: true } },
+      { $group: { _id: null, total: { $sum: '$price' } } }
+    ]);
+    
+    const soldItems = await Transaction.countDocuments({
+      dateOfSale: { $regex: `${month}`, $options: 'i' },
+      sold: true
+    });
+    
+    const notSoldItems = await Transaction.countDocuments({
+      dateOfSale: { $regex: `${month}`, $options: 'i' },
+      sold: false
+    });
+    
+    res.json({
+      totalSaleAmount: totalSaleAmount[0]?.total || 0,
+      soldItems,
+      notSoldItems
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch statistics' });
+  }
+});
+
+// Bar chart
+app.get('/api/bar-chart', async (req, res) => {
+  const { month } = req.query;
+  
+  try {
+    const ranges = [
+      { min: 0, max: 100 },
+      { min: 101, max: 200 },
+      { min: 201, max: 300 },
+      { min: 301, max: 400 },
+      { min: 401, max: 500 },
+      { min: 501, max: 600 },
+      { min: 601, max: 700 },
+      { min: 701, max: 800 },
+      { min: 801, max: 900 },
+      { min: 901, max: Infinity }
+    ];
+    
+    const result = await Promise.all(ranges.map(async (range) => {
+      const count = await Transaction.countDocuments({
+        dateOfSale: { $regex: `${month}`, $options: 'i' },
+        price: { $gte: range.min, $lte: range.max }
+      });
+      
+      return {
+        range: `${range.min} - ${range.max === Infinity ? 'above' : range.max}`,
+        count
+      };
+    }));
+    
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch bar chart data' });
+  }
+});
+
+// Pie chart
+app.get('/api/pie-chart', async (req, res) => {
+  const { month } = req.query;
+  
+  try {
+    const result = await Transaction.aggregate([
+      { $match: { dateOfSale: { $regex: `${month}`, $options: 'i' } } },
+      { $group: { _id: '$category', count: { $sum: 1 } } }
+    ]);
+    
+    res.json(result.map(item => ({ category: item._id, items: item.count })));
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch pie chart data' });
+  }
+});
+
+// Combined data
+app.get('/api/combined-data', async (req, res) => {
+  const { month } = req.query;
+  
+  try {
+    const [transactions, statistics, barChart, pieChart] = await Promise.all([
+      fetch(`http://localhost:${port}/api/transactions?month=${month}`).then(res => res.json()),
+      fetch(`http://localhost:${port}/api/statistics?month=${month}`).then(res => res.json()),
+      fetch(`http://localhost:${port}/api/bar-chart?month=${month}`).then(res => res.json()),
+      fetch(`http://localhost:${port}/api/pie-chart?month=${month}`).then(res => res.json())
+    ]);
+    
+    res.json({
+      transactions,
+      statistics,
+      barChart,
+      pieChart
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch combined data' });
+  }
+});
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
